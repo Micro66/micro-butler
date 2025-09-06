@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "@types/express": "^5.0.3",
+    "express": "^5.1.0",
+    "module-alias": "^2.2.3",
+    "socket.io-client": "^4.8.1",
+    "ws": "^8.18.3"
+  }
+}

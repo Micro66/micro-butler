@@ -1,0 +1,13 @@
+{
+  "appName": "TestApp",
+  "version": "1.0.0",
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "name": "testdb"
+  },
+  "features": {
+    "enableLogging": true,
+    "maxConnections": 100
+  }
+}
