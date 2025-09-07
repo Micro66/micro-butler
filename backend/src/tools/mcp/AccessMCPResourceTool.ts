@@ -39,7 +39,7 @@ export class AccessMCPResourceTool extends BaseTool {
         };
       }
       
-      if (!uri) {
+      if (!uri || uri.trim() === '') {
         return {
           success: false,
           error: 'Missing required parameter: uri',

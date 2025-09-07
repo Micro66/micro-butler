@@ -4,16 +4,38 @@ import { ToolExecutionContext } from '../../../src/types';
 describe('UseMCPTool', () => {
   let tool: UseMCPTool;
   let mockContext: ToolExecutionContext;
+  let mockMCPManager: any;
 
   beforeEach(() => {
     tool = new UseMCPTool();
+    
+    // Mock MCPManager
+    mockMCPManager = {
+      isServerConnected: jest.fn().mockReturnValue(true),
+      getServerTools: jest.fn().mockResolvedValue([
+        { name: 'get_weather', description: 'Get weather information' },
+        { name: 'send_email', description: 'Send an email' },
+        { name: 'test_tool', description: 'Test tool for testing' }
+      ]),
+      getServerConfig: jest.fn().mockReturnValue({}),
+      callTool: jest.fn().mockImplementation(async (serverName: string, toolName: string, args: any) => {
+          // Add small delay to ensure executionTime > 0
+          await new Promise(resolve => setTimeout(resolve, 1));
+          return {
+            content: 'MCP tool execution ready - MCPManager integration pending',
+            isError: false
+          };
+        })
+    };
+    
     mockContext = {
       parameters: {},
       workspacePath: '/test/workspace',
       taskId: 'test-task-id',
       security: {},
-      securityManager: undefined
-    };
+      securityManager: undefined,
+      mcpManager: mockMCPManager
+    } as any;
     jest.clearAllMocks();
   });
 
@@ -72,6 +94,9 @@ describe('UseMCPTool', () => {
     });
 
     it('should accept valid parameters', async () => {
+      // Reset mock to ensure server is connected
+      mockMCPManager.isServerConnected.mockReturnValue(true);
+      
       mockContext.parameters = {
         server_name: 'test_server',
         tool_name: 'test_tool',
@@ -85,7 +110,8 @@ describe('UseMCPTool', () => {
         server: 'test_server',
         tool: 'test_tool',
         arguments: { param1: 'value1' },
-        message: 'MCP tool execution ready - MCPManager integration pending'
+        content: 'MCP tool execution ready - MCPManager integration pending',
+        isError: false
       });
     });
   });
@@ -124,22 +150,18 @@ describe('UseMCPTool', () => {
     });
 
     it('should handle execution errors gracefully', async () => {
-      // Mock an error scenario by providing invalid context
-      const invalidContext = {
-        ...mockContext,
-        parameters: {
-          server_name: 'test_server',
-          tool_name: 'test_tool'
-        }
-      } as any;
+      // Mock server not connected scenario
+      mockMCPManager.isServerConnected.mockReturnValue(false);
       
-      // Remove required properties to trigger error
-      delete invalidContext.taskId;
+      mockContext.parameters = {
+        server_name: 'disconnected_server',
+        tool_name: 'test_tool'
+      };
 
-      const result = await tool.execute(invalidContext);
+      const result = await tool.execute(mockContext);
 
       expect(result.success).toBe(false);
-      expect(result.error).toBeDefined();
+      expect(result.error).toBe("MCP server 'disconnected_server' is not connected");
       expect(result.executionTime).toBeGreaterThan(0);
     });
   });

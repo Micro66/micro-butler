@@ -401,8 +401,7 @@ export class TaskManager extends EventEmitter {
     
     // 如果任务正在运行，先中止
     if (task.getStatus() === 'running') {
-      // TODO: 实现Task.abort()方法
-      // await task.abort();
+      await task.abortTask();
     }
     
     this.tasks.delete(taskId);

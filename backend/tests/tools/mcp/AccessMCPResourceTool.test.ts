@@ -4,16 +4,34 @@ import { ToolExecutionContext } from '../../../src/types';
 describe('AccessMCPResourceTool', () => {
   let tool: AccessMCPResourceTool;
   let mockContext: ToolExecutionContext;
+  let mockMCPManager: any;
 
   beforeEach(() => {
     tool = new AccessMCPResourceTool();
+    
+    // Mock MCPManager
+    mockMCPManager = {
+      isServerConnected: jest.fn().mockReturnValue(true),
+      readResource: jest.fn().mockImplementation(async (serverName: string, uri: string) => {
+        // Add small delay to ensure executionTime > 0
+        await new Promise(resolve => setTimeout(resolve, 1));
+        return {
+          server: serverName,
+          uri: uri,
+          content: 'MCP resource access ready - MCPManager integration pending',
+          mimeType: 'text/plain'
+        };
+      })
+    };
+    
     mockContext = {
       parameters: {},
       workspacePath: '/test/workspace',
       taskId: 'test-task-id',
       security: {},
-      securityManager: undefined
-    };
+      securityManager: undefined,
+      mcpManager: mockMCPManager
+    } as any;
     jest.clearAllMocks();
   });
 
@@ -127,23 +145,22 @@ describe('AccessMCPResourceTool', () => {
     });
 
     it('should handle execution errors gracefully', async () => {
-      // Mock an error scenario by providing invalid context
-      const invalidContext = {
-        ...mockContext,
-        parameters: {
-          server_name: 'test_server',
-          uri: 'test://resource'
-        }
-      } as any;
+      // Mock server not connected scenario
+      mockMCPManager.isServerConnected.mockReturnValue(false);
       
-      // Remove required properties to trigger error
-      delete invalidContext.taskId;
+      mockContext.parameters = {
+        server_name: 'disconnected_server',
+        uri: 'test://resource'
+      };
 
-      const result = await tool.execute(invalidContext);
+      const result = await tool.execute(mockContext);
 
       expect(result.success).toBe(false);
-      expect(result.error).toBeDefined();
+      expect(result.error).toBe("MCP server 'disconnected_server' is not connected");
       expect(result.executionTime).toBeGreaterThan(0);
+      
+      // Reset mock for other tests
+      mockMCPManager.isServerConnected.mockReturnValue(true);
     });
   });
 

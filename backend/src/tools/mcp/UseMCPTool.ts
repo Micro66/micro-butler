@@ -107,7 +107,8 @@ export class UseMCPTool extends BaseTool {
         server: server_name,
         tool: tool_name,
         content: mcpResult.content,
-        isError: mcpResult.isError
+        isError: mcpResult.isError,
+        arguments: parsedArguments
       };
       
       logger.info('MCP tool execution successful', {

@@ -3,6 +3,8 @@ import { Logger } from 'winston';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { createClient, RedisClientType } from 'redis';
+import { MongoClient, Db, Collection } from 'mongodb';
 
 export interface TaskStorageOptions {
   storageType?: 'file' | 'redis' | 'mongodb';
@@ -507,6 +509,571 @@ export class FileTaskStorage extends TaskStorage {
 }
 
 /**
+ * Redis-based task storage implementation
+ */
+export class RedisTaskStorage extends TaskStorage {
+  private client: RedisClientType;
+  private isConnected: boolean = false;
+  private readonly keyPrefix: string = 'micro-butler:task:';
+  private readonly indexKey: string = 'micro-butler:task:index';
+
+  constructor(options: TaskStorageOptions = {}, logger: Logger) {
+    super(options, logger);
+    
+    const connectionString = options.connectionString || 'redis://localhost:6379';
+    this.client = createClient({ url: connectionString });
+    
+    this.client.on('error', (err) => {
+      this.logger.error('Redis client error:', err);
+    });
+    
+    this.client.on('connect', () => {
+      this.logger.info('Connected to Redis');
+      this.isConnected = true;
+    });
+    
+    this.client.on('disconnect', () => {
+      this.logger.warn('Disconnected from Redis');
+      this.isConnected = false;
+    });
+  }
+
+  async initialize(): Promise<void> {
+    try {
+      await this.client.connect();
+      this.logger.info('Redis task storage initialized');
+    } catch (error) {
+      this.logger.error('Failed to initialize Redis task storage:', error);
+      throw error;
+    }
+  }
+
+  async saveTask(task: StoredTask): Promise<void> {
+    try {
+      const taskKey = `${this.keyPrefix}${task.taskId}`;
+      const taskData = JSON.stringify(task);
+      
+      await this.client.hSet(taskKey, {
+        data: taskData,
+        status: task.status,
+        createdAt: task.createdAt.toISOString(),
+        updatedAt: task.updatedAt.toISOString()
+      });
+      
+      // Add to index
+      await this.client.sAdd(this.indexKey, task.taskId);
+      
+      this.emit('taskSaved', { taskId: task.taskId });
+      this.logger.debug('Task saved to Redis', { taskId: task.taskId });
+    } catch (error) {
+      this.logger.error('Failed to save task to Redis', { taskId: task.taskId, error });
+      throw error;
+    }
+  }
+
+  async getTask(taskId: string): Promise<StoredTask | null> {
+    try {
+      const taskKey = `${this.keyPrefix}${taskId}`;
+      const taskData = await this.client.hGet(taskKey, 'data');
+      
+      if (!taskData) {
+        return null;
+      }
+      
+      const task = JSON.parse(taskData) as StoredTask;
+      // Convert date strings back to Date objects
+      task.createdAt = new Date(task.createdAt);
+      task.updatedAt = new Date(task.updatedAt);
+      if (task.completedAt) {
+        task.completedAt = new Date(task.completedAt);
+      }
+      
+      return task;
+    } catch (error) {
+      this.logger.error('Failed to get task from Redis', { taskId, error });
+      return null;
+    }
+  }
+
+  async updateTaskStatus(taskId: string, status: TaskStatus, error?: string): Promise<void> {
+    try {
+      const task = await this.getTask(taskId);
+      if (!task) {
+        throw new Error(`Task not found: ${taskId}`);
+      }
+      
+      task.status = status;
+      task.updatedAt = new Date();
+      if (error) {
+        task.error = error;
+      }
+      if (status === 'completed' || status === 'failed' || status === 'aborted') {
+        task.completedAt = new Date();
+      }
+      
+      await this.saveTask(task);
+      this.emit('taskStatusUpdated', { taskId, status });
+    } catch (err) {
+      this.logger.error('Failed to update task status in Redis', { taskId, status, error: err });
+      throw err;
+    }
+  }
+
+  async updateTaskMessages(taskId: string, messages: ClineMessage[]): Promise<void> {
+    try {
+      const task = await this.getTask(taskId);
+      if (!task) {
+        throw new Error(`Task not found: ${taskId}`);
+      }
+      
+      task.messages = messages;
+      task.updatedAt = new Date();
+      
+      await this.saveTask(task);
+      this.emit('taskMessagesUpdated', { taskId, messageCount: messages.length });
+    } catch (error) {
+      this.logger.error('Failed to update task messages in Redis', { taskId, error });
+      throw error;
+    }
+  }
+
+  async updateTaskTodos(taskId: string, todos: TodoItem[]): Promise<void> {
+    try {
+      const task = await this.getTask(taskId);
+      if (!task) {
+        throw new Error(`Task not found: ${taskId}`);
+      }
+      
+      task.todos = todos;
+      task.updatedAt = new Date();
+      
+      await this.saveTask(task);
+      this.emit('taskTodosUpdated', { taskId, todoCount: todos.length });
+    } catch (error) {
+      this.logger.error('Failed to update task todos in Redis', { taskId, error });
+      throw error;
+    }
+  }
+
+  async queryTasks(query: TaskQuery): Promise<StoredTask[]> {
+    try {
+      const taskIds = await this.client.sMembers(this.indexKey);
+      const tasks: StoredTask[] = [];
+      
+      for (const taskId of taskIds) {
+        const task = await this.getTask(taskId);
+        if (task && this.matchesQuery(task, query)) {
+          tasks.push(task);
+        }
+      }
+      
+      // Sort by creation date (newest first)
+      tasks.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      
+      // Apply pagination
+      const offset = query.offset || 0;
+      const limit = query.limit || 50;
+      
+      return tasks.slice(offset, offset + limit);
+    } catch (error) {
+      this.logger.error('Failed to query tasks from Redis', { query, error });
+      return [];
+    }
+  }
+
+  async deleteTask(taskId: string): Promise<void> {
+    try {
+      const taskKey = `${this.keyPrefix}${taskId}`;
+      
+      await this.client.del(taskKey);
+      await this.client.sRem(this.indexKey, taskId);
+      
+      this.emit('taskDeleted', { taskId });
+      this.logger.debug('Task deleted from Redis', { taskId });
+    } catch (error) {
+      this.logger.error('Failed to delete task from Redis', { taskId, error });
+      throw error;
+    }
+  }
+
+  async getStats(): Promise<TaskStorageStats> {
+    try {
+      const taskIds = await this.client.sMembers(this.indexKey);
+      const tasksByStatus: Record<TaskStatus, number> = {
+        'created': 0,
+        'pending': 0,
+        'running': 0,
+        'paused': 0,
+        'completed': 0,
+        'failed': 0,
+        'aborted': 0
+      };
+      
+      let oldestTask: Date | undefined;
+      let newestTask: Date | undefined;
+      
+      for (const taskId of taskIds) {
+        const taskKey = `${this.keyPrefix}${taskId}`;
+        const status = await this.client.hGet(taskKey, 'status') as TaskStatus;
+        const createdAt = await this.client.hGet(taskKey, 'createdAt');
+        
+        if (status) {
+          tasksByStatus[status]++;
+        }
+        
+        if (createdAt) {
+          const date = new Date(createdAt);
+          if (!oldestTask || date < oldestTask) {
+            oldestTask = date;
+          }
+          if (!newestTask || date > newestTask) {
+            newestTask = date;
+          }
+        }
+      }
+      
+      return {
+        totalTasks: taskIds.length,
+        tasksByStatus,
+        ...(oldestTask && { oldestTask }),
+        ...(newestTask && { newestTask }),
+        storageSize: 0 // Redis doesn't provide easy way to get storage size
+      };
+    } catch (error) {
+      this.logger.error('Failed to get stats from Redis', { error });
+      throw error;
+    }
+  }
+
+  async cleanup(): Promise<number> {
+    try {
+      const maxAge = this.options.maxTaskHistory || 30; // days
+      const cutoffDate = new Date(Date.now() - maxAge * 24 * 60 * 60 * 1000);
+      
+      const taskIds = await this.client.sMembers(this.indexKey);
+      let deletedCount = 0;
+      
+      for (const taskId of taskIds) {
+        const taskKey = `${this.keyPrefix}${taskId}`;
+        const createdAtStr = await this.client.hGet(taskKey, 'createdAt');
+        
+        if (createdAtStr) {
+          const createdAt = new Date(createdAtStr);
+          if (createdAt < cutoffDate) {
+            await this.deleteTask(taskId);
+            deletedCount++;
+          }
+        }
+      }
+      
+      this.logger.info(`Cleaned up ${deletedCount} old tasks from Redis`);
+      return deletedCount;
+    } catch (error) {
+      this.logger.error('Failed to cleanup Redis storage', { error });
+      return 0;
+    }
+  }
+
+  async close(): Promise<void> {
+    try {
+      this.stopCleanup();
+      if (this.isConnected) {
+        await this.client.quit();
+      }
+      this.logger.info('Redis task storage closed');
+    } catch (error) {
+      this.logger.error('Failed to close Redis task storage', { error });
+    }
+  }
+
+  private matchesQuery(task: StoredTask, query: TaskQuery): boolean {
+    if (query.status && task.status !== query.status) {
+      return false;
+    }
+    
+    if (query.createdAfter && task.createdAt < query.createdAfter) {
+      return false;
+    }
+    
+    if (query.createdBefore && task.createdAt > query.createdBefore) {
+      return false;
+    }
+    
+    return true;
+  }
+}
+
+/**
+ * MongoDB-based task storage implementation
+ */
+export class MongoTaskStorage extends TaskStorage {
+  private client: MongoClient;
+  private db!: Db;
+  private collection!: Collection<StoredTask>;
+  private isConnected: boolean = false;
+  private readonly dbName: string = 'micro-butler';
+  private readonly collectionName: string = 'tasks';
+
+  constructor(options: TaskStorageOptions = {}, logger: Logger) {
+    super(options, logger);
+    
+    const connectionString = options.connectionString || 'mongodb://localhost:27017';
+    this.client = new MongoClient(connectionString);
+  }
+
+  async initialize(): Promise<void> {
+    try {
+      await this.client.connect();
+      this.db = this.client.db(this.dbName);
+      this.collection = this.db.collection<StoredTask>(this.collectionName);
+      
+      // Create indexes for better performance
+      await this.collection.createIndex({ taskId: 1 }, { unique: true });
+      await this.collection.createIndex({ status: 1 });
+      await this.collection.createIndex({ createdAt: 1 });
+      
+      this.isConnected = true;
+      this.logger.info('MongoDB task storage initialized');
+    } catch (error) {
+      this.logger.error('Failed to initialize MongoDB task storage:', error);
+      throw error;
+    }
+  }
+
+  async saveTask(task: StoredTask): Promise<void> {
+    try {
+      await this.collection.replaceOne(
+        { taskId: task.taskId },
+        task,
+        { upsert: true }
+      );
+      
+      this.emit('taskSaved', { taskId: task.taskId });
+      this.logger.debug('Task saved to MongoDB', { taskId: task.taskId });
+    } catch (error) {
+      this.logger.error('Failed to save task to MongoDB', { taskId: task.taskId, error });
+      throw error;
+    }
+  }
+
+  async getTask(taskId: string): Promise<StoredTask | null> {
+    try {
+      const task = await this.collection.findOne({ taskId });
+      return task || null;
+    } catch (error) {
+      this.logger.error('Failed to get task from MongoDB', { taskId, error });
+      return null;
+    }
+  }
+
+  async updateTaskStatus(taskId: string, status: TaskStatus, error?: string): Promise<void> {
+    try {
+      const updateDoc: any = {
+        status,
+        updatedAt: new Date()
+      };
+      
+      if (error) {
+        updateDoc.error = error;
+      }
+      
+      if (status === 'completed' || status === 'failed' || status === 'aborted') {
+        updateDoc.completedAt = new Date();
+      }
+      
+      const result = await this.collection.updateOne(
+        { taskId },
+        { $set: updateDoc }
+      );
+      
+      if (result.matchedCount === 0) {
+        throw new Error(`Task not found: ${taskId}`);
+      }
+      
+      this.emit('taskStatusUpdated', { taskId, status });
+    } catch (err) {
+      this.logger.error('Failed to update task status in MongoDB', { taskId, status, error: err });
+      throw err;
+    }
+  }
+
+  async updateTaskMessages(taskId: string, messages: ClineMessage[]): Promise<void> {
+    try {
+      const result = await this.collection.updateOne(
+        { taskId },
+        { 
+          $set: { 
+            messages,
+            updatedAt: new Date()
+          }
+        }
+      );
+      
+      if (result.matchedCount === 0) {
+        throw new Error(`Task not found: ${taskId}`);
+      }
+      
+      this.emit('taskMessagesUpdated', { taskId, messageCount: messages.length });
+    } catch (error) {
+      this.logger.error('Failed to update task messages in MongoDB', { taskId, error });
+      throw error;
+    }
+  }
+
+  async updateTaskTodos(taskId: string, todos: TodoItem[]): Promise<void> {
+    try {
+      const result = await this.collection.updateOne(
+        { taskId },
+        { 
+          $set: { 
+            todos,
+            updatedAt: new Date()
+          }
+        }
+      );
+      
+      if (result.matchedCount === 0) {
+        throw new Error(`Task not found: ${taskId}`);
+      }
+      
+      this.emit('taskTodosUpdated', { taskId, todoCount: todos.length });
+    } catch (error) {
+      this.logger.error('Failed to update task todos in MongoDB', { taskId, error });
+      throw error;
+    }
+  }
+
+  async queryTasks(query: TaskQuery): Promise<StoredTask[]> {
+    try {
+      const filter: any = {};
+      
+      if (query.status) {
+        filter.status = query.status;
+      }
+      
+      if (query.createdAfter) {
+        filter.createdAt = { $gte: query.createdAfter };
+      }
+      
+      if (query.createdBefore) {
+        if (filter.createdAt) {
+          filter.createdAt.$lte = query.createdBefore;
+        } else {
+          filter.createdAt = { $lte: query.createdBefore };
+        }
+      }
+      
+      const cursor = this.collection
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip(query.offset || 0)
+        .limit(query.limit || 50);
+      
+      return await cursor.toArray();
+    } catch (error) {
+      this.logger.error('Failed to query tasks from MongoDB', { query, error });
+      return [];
+    }
+  }
+
+  async deleteTask(taskId: string): Promise<void> {
+    try {
+      const result = await this.collection.deleteOne({ taskId });
+      
+      if (result.deletedCount === 0) {
+        throw new Error(`Task not found: ${taskId}`);
+      }
+      
+      this.emit('taskDeleted', { taskId });
+      this.logger.debug('Task deleted from MongoDB', { taskId });
+    } catch (error) {
+      this.logger.error('Failed to delete task from MongoDB', { taskId, error });
+      throw error;
+    }
+  }
+
+  async getStats(): Promise<TaskStorageStats> {
+    try {
+      const totalTasks = await this.collection.countDocuments();
+      
+      // Get task counts by status
+      const statusCounts = await this.collection.aggregate([
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 }
+          }
+        }
+      ]).toArray();
+      
+      const tasksByStatus: Record<TaskStatus, number> = {
+        'created': 0,
+        'pending': 0,
+        'running': 0,
+        'paused': 0,
+        'completed': 0,
+        'failed': 0,
+        'aborted': 0
+      };
+      
+      statusCounts.forEach(item => {
+        if (item._id in tasksByStatus) {
+          tasksByStatus[item._id as TaskStatus] = item.count;
+        }
+      });
+      
+      // Get oldest and newest tasks
+      const oldestTask = await this.collection.findOne({}, { sort: { createdAt: 1 } });
+      const newestTask = await this.collection.findOne({}, { sort: { createdAt: -1 } });
+      
+      // Get approximate storage size (this is a rough estimate)
+      const stats = await this.db.stats();
+      
+      return {
+        totalTasks,
+        tasksByStatus,
+        ...(oldestTask && { oldestTask: oldestTask.createdAt }),
+        ...(newestTask && { newestTask: newestTask.createdAt }),
+        storageSize: stats.dataSize || 0
+      };
+    } catch (error) {
+      this.logger.error('Failed to get stats from MongoDB', { error });
+      throw error;
+    }
+  }
+
+  async cleanup(): Promise<number> {
+    try {
+      const maxAge = this.options.maxTaskHistory || 30; // days
+      const cutoffDate = new Date(Date.now() - maxAge * 24 * 60 * 60 * 1000);
+      
+      const result = await this.collection.deleteMany({
+        createdAt: { $lt: cutoffDate }
+      });
+      
+      this.logger.info(`Cleaned up ${result.deletedCount} old tasks from MongoDB`);
+      return result.deletedCount || 0;
+    } catch (error) {
+      this.logger.error('Failed to cleanup MongoDB storage', { error });
+      return 0;
+    }
+  }
+
+  async close(): Promise<void> {
+    try {
+      this.stopCleanup();
+      if (this.isConnected) {
+        await this.client.close();
+        this.isConnected = false;
+      }
+      this.logger.info('MongoDB task storage closed');
+    } catch (error) {
+      this.logger.error('Failed to close MongoDB task storage', { error });
+    }
+  }
+}
+
+/**
  * 创建任务存储实例
  */
 export function createTaskStorage(options: TaskStorageOptions = {}, logger: Logger): TaskStorage {
@@ -515,11 +1082,9 @@ export function createTaskStorage(options: TaskStorageOptions = {}, logger: Logg
     case 'file':
       return new FileTaskStorage(options, logger);
     case 'redis':
-      // TODO: 实现 Redis 存储
-      throw new Error('Redis storage not implemented yet');
+      return new RedisTaskStorage(options, logger);
     case 'mongodb':
-      // TODO: 实现 MongoDB 存储
-      throw new Error('MongoDB storage not implemented yet');
+      return new MongoTaskStorage(options, logger);
     default:
       throw new Error(`Unsupported storage type: ${storageType}`);
   }
