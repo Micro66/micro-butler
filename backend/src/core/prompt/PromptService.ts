@@ -16,6 +16,7 @@ export interface PromptContext {
   modelId?: string;
   experiments?: Record<string, boolean>;
   availableTools?: ToolDefinition[];
+  mcpManager?: any; // MCPManager instance
   environmentInfo?: {
     os: string;
     shell: string;
@@ -26,6 +27,7 @@ export interface PromptContext {
 export interface SystemPromptContext {
   roleDefinition: string;
   toolDescriptions: string;
+  mcpServers: string;
   capabilities: string;
   rules: string;
   systemInfo: string;
@@ -39,10 +41,12 @@ export interface SystemPromptContext {
 export class PromptService {
   private logger: Logger;
   private toolRegistry: ToolRegistry;
+  private configManager?: any;
 
-  constructor(toolRegistry: ToolRegistry, logger?: Logger) {
+  constructor(toolRegistry: ToolRegistry, logger?: Logger, configManager?: any) {
     this.toolRegistry = toolRegistry;
     this.logger = logger || console as any;
+    this.configManager = configManager;
   }
 
   /**
@@ -79,6 +83,7 @@ export class PromptService {
         ...(modelId && { modelId }),
         experiments
       }),
+      mcpServers: await this.generateMCPServersSection(options.mcpManager),
       capabilities: this.getCapabilitiesSection(),
       rules: this.getRulesSection(),
       systemInfo: this.getSystemInfoSection(),
@@ -95,6 +100,7 @@ export class PromptService {
       this.getMarkdownFormattingSection(),
       this.getSharedToolUseSection(),
       context.toolDescriptions,
+      context.mcpServers,
       this.getToolUseGuidelinesSection(),
       context.capabilities,
       context.rules,
@@ -510,6 +516,92 @@ Follow these guidelines regarding tool calls
     }
     
     return prompt;
+  }
+
+  /**
+   * 生成 MCP 服务器部分 - 参考 roo-code 的 getMcpServersSection
+   */
+  private async generateMCPServersSection(mcpManager?: any): Promise<string> {
+    let mcpConfig: Record<string, any> = {};
+    
+    try {
+      // 优先使用注入的 ConfigManager
+      if (this.configManager) {
+        const config = this.configManager.getConfig();
+        mcpConfig = config.mcpServers || {};
+        this.logger.info('Reading MCP config from ConfigManager', { 
+          configPath: this.configManager.configPath,
+          serverCount: Object.keys(mcpConfig).length 
+        });
+      } else {
+        // 回退到直接读取用户配置文件
+        const fs = require('fs');
+        const path = require('path');
+        const os = require('os');
+        
+        // 按 ConfigManager 的逻辑查找配置文件
+        const userConfigPath = path.join(os.homedir(), '.micro-butler', 'config', 'app.json');
+        let configPath = userConfigPath;
+        
+        if (!fs.existsSync(userConfigPath)) {
+          configPath = path.join(process.cwd(), 'config/app.json');
+        }
+        
+        this.logger.info('Reading MCP config from file', { configPath });
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        mcpConfig = config.mcpServers || {};
+      }
+    } catch (error) {
+      this.logger.warn('Failed to read MCP config:', error);
+      return '';
+    }
+
+    const serverNames = Object.keys(mcpConfig);
+    if (serverNames.length === 0) {
+      return '';
+    }
+
+    const connectedServers = serverNames
+      .filter(name => !mcpConfig[name].disabled)
+      .map(name => {
+        const server = mcpConfig[name];
+        const commandStr = server.command ? 
+          `\`${server.command}${server.args ? ` ${server.args.join(' ')}` : ''}\`` : '';
+        
+        let description = `## ${name}${commandStr ? ` (${commandStr})` : ''}\n`;
+        
+        // 根据服务器类型添加描述
+        if (name === 'duckduckgo-search') {
+          description += `\n### Available Tools\n`;
+          description += `- search: Search the web using DuckDuckGo\n`;
+          description += `    Input Schema:\n`;
+          description += `    {\n`;
+          description += `      "type": "object",\n`;
+          description += `      "properties": {\n`;
+          description += `        "query": {"type": "string", "description": "Search query"},\n`;
+          description += `        "num_results": {"type": "number", "description": "Number of results (default: 5)"}\n`;
+          description += `      },\n`;
+          description += `      "required": ["query"]\n`;
+          description += `    }`;
+        }
+        
+        return description;
+      })
+      .join('\n\n');
+
+    if (!connectedServers) {
+      return '';
+    }
+
+    return `MCP SERVERS
+
+The Model Context Protocol (MCP) enables communication with MCP servers that provide additional tools and resources to extend your capabilities.
+
+# Connected MCP Servers
+
+When a server is connected, you can use the server's tools via the \`use_mcp_tool\` tool, and access the server's resources via the \`access_mcp_resource\` tool.
+
+${connectedServers}`;
   }
 
   /**

@@ -1,4 +1,4 @@
-import { AppConfig, ApiConfiguration, SecurityConfig, ServerConfig, StorageConfig, LoggingConfig, ApiProvider } from '@/types';
+import { AppConfig, ApiConfiguration, SecurityConfig, ServerConfig, StorageConfig, LoggingConfig, ApiProvider, MCPConfig } from '@/types';
 import { Logger } from 'winston';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -206,6 +206,12 @@ export class ConfigManager {
           enabled: true,
           level: 'info'
         }
+      },
+      mcp: {
+        enabled: false,
+        servers: {},
+        globalConfigPath: '~/.micro-butler/mcp/servers.json',
+        projectConfigPath: './.mcp/servers.json'
       }
     };
   }
@@ -345,6 +351,29 @@ export class ConfigManager {
    */
   public getLoggingConfig(): LoggingConfig {
     return { ...this.config.logging };
+  }
+
+  /**
+   * 获取 MCP 配置
+   */
+  public getMCPConfig(): MCPConfig {
+    return this.config.mcp || {
+      enabled: false,
+      servers: {},
+      globalConfigPath: '~/.micro-butler/mcp/servers.json',
+      projectConfigPath: './.mcp/servers.json'
+    };
+  }
+
+  /**
+   * 更新 MCP 配置
+   */
+  public updateMCPConfig(mcpConfig: Partial<MCPConfig>): void {
+    this.config.mcp = {
+      ...this.getMCPConfig(),
+      ...mcpConfig
+    };
+    this.saveConfig();
   }
 
   /**

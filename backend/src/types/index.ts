@@ -108,6 +108,7 @@ export interface ToolExecutionContext {
   security: SecurityConfig
   parameters: Record<string, any>
   securityManager: any
+  mcpManager?: any
 }
 
 export interface ToolExecutionResult {
@@ -180,12 +181,20 @@ export interface LoggingConfig {
   }
 }
 
+export interface MCPConfig {
+  enabled?: boolean
+  servers?: Record<string, MCPServer>
+  globalConfigPath?: string
+  projectConfigPath?: string
+}
+
 export interface AppConfig {
   server: ServerConfig
   api: ApiConfig
   security: SecurityConfig
   storage: StorageConfig
   logging: LoggingConfig
+  mcp?: MCPConfig
   defaultApiConfiguration: ApiConfiguration
   apiConfigurations?: Partial<Record<ApiProvider, ApiConfiguration>>
 }
@@ -353,6 +362,60 @@ export interface TaskEvents {
   'task:message': (taskId: string, message: ClineMessage) => void
   'tool:call': (taskId: string, toolCall: ToolCall) => void
   'tool:result': (taskId: string, toolCall: ToolCall, result: ToolExecutionResult) => void
+}
+
+// ============================================================================
+// MCP Types
+// ============================================================================
+
+export interface MCPServer {
+  name: string
+  type: 'stdio' | 'sse' | 'streamable-http'
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  disabled?: boolean
+  timeout?: number
+  alwaysAllow?: string[]
+  disabledTools?: string[]
+  source?: 'global' | 'project'
+}
+
+export interface MCPTool {
+  name: string
+  description: string
+  inputSchema: any
+  server: string
+  enabled: boolean
+}
+
+export interface MCPResource {
+  uri: string
+  name: string
+  description?: string
+  mimeType?: string
+  server: string
+}
+
+export interface MCPToolCallResponse {
+  content: Array<{
+    type: 'text' | 'image'
+    text?: string
+    data?: string
+    mimeType?: string
+  }>
+  isError?: boolean
+}
+
+export interface MCPResourceResponse {
+  contents: Array<{
+    uri: string
+    mimeType?: string
+    text?: string
+    blob?: string
+  }>
 }
 
 // ============================================================================

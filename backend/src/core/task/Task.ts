@@ -24,6 +24,7 @@ import { ToolRegistry } from '@/core/tools/ToolRegistry'
 import { PromptService } from '@/core/prompt/PromptService'
 import { SecurityManager } from '@/core/security/SecurityManager'
 import { ConfigManager } from '@/config/ConfigManager'
+import { MCPManager } from '@/core/mcp/MCPManager'
 import { createLogger } from '@/utils/Logger'
 import { getAllToolGroups } from '@/tools/index'
 
@@ -59,6 +60,7 @@ export class Task extends EventEmitter implements ITask {
   private readonly toolRegistry: ToolRegistry
   private readonly promptService: PromptService
   private readonly securityManager: SecurityManager
+  private readonly mcpManager: MCPManager
   private readonly logger: any
   
   // Task data
@@ -116,7 +118,11 @@ export class Task extends EventEmitter implements ITask {
     this.securityManager = new SecurityManager({ allowedPaths: [this.workspacePath] })
     this.toolExecutor = new ToolExecutor(this.logger, this.securityManager)
     this.toolRegistry = new ToolRegistry(this.logger, this.securityManager)
-    this.promptService = new PromptService(this.toolRegistry)
+    this.mcpManager = new MCPManager(this.logger, this.configManager!)
+    this.promptService = new PromptService(this.toolRegistry, this.logger, this.configManager)
+    
+    // Initialize MCP Manager
+    this.initializeMCPManager()
     
     // Register all available tool groups
     const toolGroups = getAllToolGroups()
@@ -224,6 +230,13 @@ export class Task extends EventEmitter implements ITask {
     
     // Stop any ongoing API requests
     await (this.apiHandler as any).abortRequest?.()
+    
+    // Cleanup MCP connections
+    try {
+      await this.mcpManager.cleanup()
+    } catch (error) {
+      this.logger.warn('Failed to cleanup MCP Manager during task abort:', error)
+    }
     
     this.emit('task:aborted', this.taskId)
     this.emitStatusUpdate('aborted', 'Task aborted by user')
@@ -741,7 +754,8 @@ Otherwise, if you have not completed the task and do not need additional informa
               blockSensitiveDirectories: true
             },
             parameters: toolCall.parameters,
-            securityManager: this.securityManager
+            securityManager: this.securityManager,
+            mcpManager: this.mcpManager
           }
         )
         
@@ -916,6 +930,18 @@ Otherwise, if you have not completed the task and do not need additional informa
     this.apiConversationHistory.push(messageWithTs)
   }
   
+  /**
+   * Initialize MCP Manager
+   */
+  private async initializeMCPManager(): Promise<void> {
+    try {
+      await this.mcpManager.initialize()
+      this.logger.info('MCP Manager initialized successfully', { taskId: this.taskId })
+    } catch (error) {
+      this.logger.warn('Failed to initialize MCP Manager:', error)
+    }
+  }
+
   private emitStatusUpdate(status: TaskStatus, message?: string): void {
     const update: TaskStatusUpdate = {
       taskId: this.taskId,

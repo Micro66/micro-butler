@@ -6,6 +6,7 @@ import { CommandTools } from './command';
 import { BrowserTools } from './browser';
 import { InteractionTools } from './interaction';
 import { TaskTools } from './task';
+import { MCPTools } from './mcp';
 
 // 导出基础工具类
 export { BaseTool } from './base/BaseTool';
@@ -16,7 +17,8 @@ export {
   CommandTools,
   BrowserTools,
   InteractionTools,
-  TaskTools
+  TaskTools,
+  MCPTools
 };
 
 // 导出所有具体工具类
@@ -25,6 +27,7 @@ export * from './command';
 export * from './browser';
 export * from './interaction';
 export * from './task';
+export * from './mcp';
 
 // 定义工具组接口
 export interface ToolGroupInstance {
@@ -42,7 +45,8 @@ export function getAllToolGroups(): ToolGroupInstance[] {
     new CommandTools(),
     new BrowserTools(),
     new InteractionTools(),
-    new TaskTools()
+    new TaskTools(),
+    new MCPTools()
   ];
 }
 
