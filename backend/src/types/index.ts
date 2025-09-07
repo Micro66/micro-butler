@@ -253,6 +253,15 @@ export interface CreateTaskResponse {
   createdAt: Date
 }
 
+export interface StartTaskRequest {
+  stream?: boolean
+}
+
+export interface StartTaskResponse {
+  message: string
+  stream?: boolean
+}
+
 export interface GetTaskResponse {
   taskId: string
   status: TaskStatus

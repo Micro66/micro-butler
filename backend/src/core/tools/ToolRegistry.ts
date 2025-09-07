@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { Logger } from 'winston';
 import { ToolDefinition, ToolGroup, ToolCall, ToolExecutionContext, ToolExecutionResult } from '../../types/index.js';
 import { SecurityManager } from '../security/SecurityManager.js';
-import { TOOL_GROUPS, ALWAYS_AVAILABLE_TOOLS, ToolGroupConfig } from '../../shared/tools.js';
+import { TOOL_GROUPS, ALWAYS_AVAILABLE_TOOLS, ToolGroupConfig } from '../../shared/tools';
 
 interface ToolRegistryOptions {
   enableSecurity?: boolean

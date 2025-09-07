@@ -33,9 +33,6 @@ export class ApiHandler extends EventEmitter {
   ): Promise<ApiResponse> {
     this.abortController = new AbortController();
     
-    // 添加调试日志
-    console.log('ApiHandler makeRequest - config:', JSON.stringify(this.config, null, 2));
-    
     try {
       // 根据不同的 API 提供商实现请求逻辑
       switch (this.config.provider) {
@@ -110,7 +107,7 @@ export class ApiHandler extends EventEmitter {
     apiMessages.push(...messages.map(msg => ({
       role: msg.role,
       content: typeof msg.content === 'string' ? msg.content : 
-        msg.content.map((c: any) => c.type === 'text' ? c.text : c).join('')
+        this.formatContentForSiliconFlow(msg.content)
     })));
     
     const requestBody = {
@@ -121,57 +118,109 @@ export class ApiHandler extends EventEmitter {
       stream: !!onStream
     };
     
-    // 打印发送给模型的完整消息
-    // console.log('\n=== 发送给AI模型的完整消息 ===');
-    // console.log('API URL:', url);
-    // console.log('模型:', requestBody.model);
-    // console.log('温度:', requestBody.temperature);
-    // console.log('最大令牌数:', requestBody.max_tokens);
-    // console.log('流式传输:', requestBody.stream);
-    // console.log('消息总数:', requestBody.messages.length);
-    
-    // requestBody.messages.forEach((msg, index) => {
-    //   console.log(`\n--- 消息 ${index + 1} (${msg.role}) ---`);
-    //   if (msg.role === 'system') {
-    //     console.log('系统提示词长度:', msg.content.length, '字符');
-    //     console.log('系统提示词内容:');
-    //     console.log(msg.content);
-    //   } else {
-    //     console.log('内容长度:', msg.content.length, '字符');
-    //     console.log('内容:');
-    //     console.log(msg.content.substring(0, 2000) + (msg.content.length > 2000 ? '\n...[内容过长，已截断]' : ''));
-    //   }
-    // });
-    
-    // console.log('\n=== 消息发送完毕 ===\n');
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(requestBody),
-      signal: this.abortController?.signal || null
-    });
-
-    if (!response.ok) {
-      throw new Error(`SiliconFlow API request failed: ${response.status} ${response.statusText}`);
-    }
-
-    if (onStream && requestBody.stream) {
-      return await this.handleSiliconFlowStream(response, onStream);
-    } else {
-      const data: any = await response.json();
-      return {
-        content: data.choices?.[0]?.message?.content || '',
-        usage: {
-          inputTokens: data.usage?.prompt_tokens || 0,
-          outputTokens: data.usage?.completion_tokens || 0,
-          totalCost: 0
+    // 打印发送给模型的完整消息（仅在需要调试时启用）
+    if (process.env.DEBUG_API_MESSAGES === 'true') {
+      console.log('\n=== 发送给AI模型的完整消息 ===');
+      console.log('API URL:', url);
+      console.log('模型:', requestBody.model);
+      console.log('温度:', requestBody.temperature);
+      console.log('最大令牌数:', requestBody.max_tokens);
+      console.log('流式传输:', requestBody.stream);
+      console.log('消息总数:', requestBody.messages.length);
+      
+      requestBody.messages.forEach((msg, index) => {
+        console.log(`\n--- 消息 ${index + 1} (${msg.role}) ---`);
+        if (msg.role === 'system') {
+          console.log('系统提示词长度:', msg.content.length, '字符');
+        } else {
+          console.log('内容长度:', msg.content.length, '字符');
+          console.log('内容:');
+          console.log(msg.content.substring(0, 2000) + (msg.content.length > 2000 ? '\n...[内容过长，已截断]' : ''));
         }
-      };
+      });
+      
+      console.log('\n=== 消息发送完毕 ===\n');
     }
+
+    // 重试逻辑：处理 429 错误
+    const maxRetries = 3;
+    let retryCount = 0;
+    
+    while (retryCount <= maxRetries) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this.config.apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody),
+          signal: this.abortController?.signal || null
+        });
+
+        if (response.status === 429 && retryCount < maxRetries) {
+          // 429 错误，需要重试
+          const retryAfter = response.headers.get('retry-after');
+          const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : Math.pow(2, retryCount) * 1000; // 指数退避
+          
+          console.log(`⏳ [重试 ${retryCount + 1}/${maxRetries}] API请求频率限制，等待 ${waitTime/1000} 秒后重试...`);
+          
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          retryCount++;
+          continue;
+        }
+
+        if (!response.ok) {
+          throw new Error(`SiliconFlow API request failed: ${response.status} ${response.statusText}`);
+        }
+
+        if (onStream && requestBody.stream) {
+          return await this.handleSiliconFlowStream(response, onStream);
+        } else {
+          const data: any = await response.json();
+          return {
+            content: data.choices?.[0]?.message?.content || '',
+            usage: {
+              inputTokens: data.usage?.prompt_tokens || 0,
+              outputTokens: data.usage?.completion_tokens || 0,
+              totalCost: 0
+            }
+          };
+        }
+      } catch (error) {
+        if (retryCount === maxRetries) {
+          throw error;
+        }
+        
+        // 如果是网络错误或其他可重试的错误，也进行重试
+        if (error instanceof TypeError && error.message.includes('fetch')) {
+          const waitTime = Math.pow(2, retryCount) * 1000;
+          console.log(`⏳ [重试 ${retryCount + 1}/${maxRetries}] 网络错误，等待 ${waitTime/1000} 秒后重试...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          retryCount++;
+          continue;
+        }
+        
+        throw error;
+      }
+    }
+    
+    throw new Error('API请求重试次数已达上限');
+  }
+
+  private formatContentForSiliconFlow(content: any[]): string {
+    return content.map((c: any) => {
+      if (c.type === 'text') {
+        return c.text;
+      } else if (c.type === 'tool_result') {
+        // 正确处理工具结果，确保完整内容被包含
+        const toolContent = typeof c.content === 'string' ? c.content : JSON.stringify(c.content, null, 2);
+        return `[Tool Result - ${c.tool_use_id}]\n${toolContent}`;
+      } else {
+        // 对于其他类型，尝试转换为字符串
+        return typeof c === 'string' ? c : JSON.stringify(c, null, 2);
+      }
+    }).join('\n\n');
   }
 
   private async handleSiliconFlowStream(

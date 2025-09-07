@@ -1,5 +1,5 @@
 import { Task } from './Task';
-import { TaskStatus, ApiConfiguration, TaskStatusUpdate, CreateTaskRequest, TaskMetadata, ClineMessage, TodoItem } from '@/types';
+import { TaskStatus, ApiConfiguration, TaskStatusUpdate, CreateTaskRequest, TaskMetadata, ClineMessage, TodoItem, StartTaskRequest } from '@/types';
 import { TaskStorage, StoredTask, TaskQuery } from '@/storage/TaskStorage';
 import { ConfigManager } from '@/config/ConfigManager';
 import { Logger } from 'winston';
@@ -85,6 +85,102 @@ export class TaskManager extends EventEmitter {
           this.logger.error('Failed to update task status in storage', { taskId, status, error });
         }
       });
+      
+      // 转发任务的所有事件，添加taskId前缀
+      const forwardEvent = (eventName: string) => {
+        task.on(eventName, (...args: any[]) => {
+          this.emit(`task:${eventName}`, taskId, ...args);
+        });
+      };
+      
+      // 转发关键事件
+      forwardEvent('task:started');
+      forwardEvent('task:paused');
+      forwardEvent('task:resumed');
+      forwardEvent('task:message');
+      forwardEvent('task:status');
+      forwardEvent('tool:call');
+      forwardEvent('tool:result');
+      forwardEvent('error');
+      
+      // 单独处理task:completed事件，避免双重前缀
+      task.on('task:completed', (data: any) => {
+        this.emit('task:completed', {
+          taskId,
+          ...data
+        });
+      });
+      
+      // 监听任务状态变化并转发为taskStatusUpdate事件
+      task.on('task:status', (statusUpdate: any) => {
+        this.emit('taskStatusUpdate', {
+          taskId,
+          status: statusUpdate.status,
+          message: statusUpdate.message,
+          timestamp: statusUpdate.timestamp
+        });
+      });
+      
+      // 监听API请求事件并添加taskId
+      task.on('apiRequest', (data: any) => {
+        this.emit('task:apiRequest', {
+          taskId,
+          ...data
+        });
+      });
+      
+      // 监听API响应事件并添加taskId
+      task.on('apiResponse', (data: any) => {
+        this.emit('task:apiResponse', {
+          taskId,
+          ...data
+        });
+      });
+      
+      // 监听工具调用事件并添加taskId
+      task.on('tool:call', (receivedTaskId: string, toolCall: any) => {
+        this.emit('task:tool:call', {
+          taskId,
+          toolCall
+        });
+      });
+      
+      // 监听工具结果事件并添加taskId
+      task.on('tool:result', (receivedTaskId: string, toolCall: any, result: any) => {
+        this.emit('task:tool:result', {
+          taskId,
+          toolCall,
+          result
+        });
+      });
+      
+      // 监听任务数据变化并更新存储
+      const updateTaskInStorage = async () => {
+        try {
+          const executionHistory = task.getExecutionHistory();
+          const updatedTask: StoredTask = {
+            taskId,
+            metadata: task.metadata,
+            status: task.getStatus(),
+            messages: task.getMessages(),
+            todos: task.getTodos(),
+            createdAt: new Date(), // 这里应该保持原始创建时间，但简化处理
+            updatedAt: new Date(),
+            apiConversationHistory: executionHistory.apiConversationHistory,
+            toolExecutionHistory: executionHistory.toolExecutionHistory,
+            executionEvents: executionHistory.executionEvents
+          };
+          await this.taskStorage.saveTask(updatedTask);
+        } catch (error) {
+          this.logger.error('Failed to update task in storage', { taskId, error });
+        }
+      };
+      
+      // 监听各种事件并更新存储
+      task.on('task:message', updateTaskInStorage);
+      task.on('task:status', updateTaskInStorage);
+      task.on('task:completed', updateTaskInStorage);
+      task.on('tool:result', updateTaskInStorage);
       
       // 保存任务到存储
       const storedTask: StoredTask = {
@@ -197,23 +293,29 @@ export class TaskManager extends EventEmitter {
   /**
    * 启动任务
    */
-  async startTask(taskId: string): Promise<void> {
+  async startTask(taskId: string, options?: StartTaskRequest): Promise<void> {
     const task = await this.getTask(taskId);
     if (!task) {
       throw new Error(`Task ${taskId} not found`);
     }
     
-    this.logger.info('Starting task', { taskId });
+    const stream = options?.stream || false;
+    this.logger.info('Starting task', { taskId, stream });
     
     try {
       // 更新状态为运行中
       await this.taskStorage.updateTaskStatus(taskId, 'running');
       
+      // 如果启用流式输出，设置任务的流式模式
+      if (stream && typeof (task as any).setStreamMode === 'function') {
+        (task as any).setStreamMode(true);
+      }
+      
       // 实际启动任务执行
       await task.startTask(task.metadata.task, task.metadata.images);
       
-      this.emit('taskStarted', taskId);
-      this.logger.info('Task started successfully', { taskId });
+      this.emit('taskStarted', taskId, { stream });
+      this.logger.info('Task started successfully', { taskId, stream });
     } catch (error) {
       this.logger.error('Failed to start task', { 
         taskId, 

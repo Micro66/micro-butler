@@ -22,6 +22,10 @@ export interface StoredTask {
   updatedAt: Date;
   completedAt?: Date;
   error?: string;
+  // 添加完整的执行历史
+  apiConversationHistory?: any[];
+  toolExecutionHistory?: any[];
+  executionEvents?: any[];
 }
 
 export interface TaskQuery {

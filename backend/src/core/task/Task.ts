@@ -69,6 +69,7 @@ export class Task extends EventEmitter implements ITask {
   
   // Streaming state
   private isStreaming: boolean = false
+  private streamMode: boolean = false
   private currentStreamingContentIndex: number = 0
   private assistantMessageContent: any[] = []
   
@@ -286,6 +287,28 @@ export class Task extends EventEmitter implements ITask {
   }
   
   /**
+   * Get API conversation history
+   */
+  public getApiConversationHistory(): any[] {
+    return [...this.apiConversationHistory]
+  }
+  
+  /**
+   * Get complete execution history for storage
+   */
+  public getExecutionHistory(): {
+    apiConversationHistory: any[];
+    toolExecutionHistory: any[];
+    executionEvents: any[];
+  } {
+    return {
+      apiConversationHistory: [...this.apiConversationHistory],
+      toolExecutionHistory: [], // 可以后续扩展
+      executionEvents: [] // 可以后续扩展
+    };
+  }
+  
+  /**
    * Update todo list
    */
   public updateTodos(todos: TodoItem[]): void {
@@ -297,6 +320,21 @@ export class Task extends EventEmitter implements ITask {
       text: 'Todo list updated',
       ts: Date.now()
     })
+  }
+
+  /**
+   * Set streaming mode for the task
+   */
+  public setStreamMode(enabled: boolean): void {
+    this.streamMode = enabled
+    this.logger.info(`[${this.taskId}] Stream mode ${enabled ? 'enabled' : 'disabled'}`)
+  }
+
+  /**
+   * Get current streaming mode status
+   */
+  public getStreamMode(): boolean {
+    return this.streamMode
   }
   
   /**
@@ -400,6 +438,15 @@ export class Task extends EventEmitter implements ITask {
     console.log(`📊 消息历史数量: ${messages.length}`)
     console.log(`🎯 系统提示词长度: ${systemPrompt.length} 字符`)
     
+    // 发射API请求事件
+    this.emit('apiRequest', {
+      messages,
+      systemPrompt,
+      timestamp: Date.now(),
+      provider: this.apiConfiguration.provider,
+      model: this.apiConfiguration.apiModelId
+    })
+    
     this.logger.info('🔄 发送API请求', {
       taskId: this.taskId,
       messageCount: messages.length,
@@ -411,10 +458,11 @@ export class Task extends EventEmitter implements ITask {
     try {
       const response = await this.apiHandler.makeRequest(
         messages,
-        (chunk) => {
+        this.streamMode ? (chunk) => {
           // Handle streaming chunks
           this.emit('streamChunk', chunk)
-        },
+          // console.log(`📡 [${this.taskId}] 流式数据块:`, chunk)
+        } : undefined,
         systemPrompt
       )
       
@@ -424,11 +472,29 @@ export class Task extends EventEmitter implements ITask {
         responseReceived: true
       })
       
+      // 发射API响应事件
+      this.emit('apiResponse', {
+        response,
+        timestamp: Date.now(),
+        success: true
+      })
+      
       return response
       
     } catch (error) {
       this.isStreaming = false
       console.log(`❌ [${this.taskId}] API请求失败: ${error instanceof Error ? error.message : String(error)}`)
+      
+      // 发射API错误响应事件
+      this.emit('apiResponse', {
+        error: error instanceof Error ? {
+          message: error.message,
+          stack: error.stack,
+          name: error.name
+        } : error,
+        timestamp: Date.now(),
+        success: false
+      })
       
       this.logger.error('❌ API请求失败', { 
         error: error instanceof Error ? {
@@ -503,6 +569,13 @@ export class Task extends EventEmitter implements ITask {
       if (toolCalls.length > 0) {
         console.log(`\n🔧 [${this.taskId}] 执行 ${toolCalls.length} 个工具调用`)
         await this.executeToolCalls(toolCalls)
+        
+        // Check if any tool call was attempt_completion
+        const hasAttemptCompletion = toolCalls.some(tc => tc.name === 'attempt_completion')
+        if (hasAttemptCompletion) {
+          return true // End the loop
+        }
+        
         return false // Continue the loop
       }
       
@@ -621,6 +694,9 @@ Otherwise, if you have not completed the task and do not need additional informa
          // For tools like execute_command, the content might be the command itself
          if (toolName === 'execute_command') {
            parameters.command = toolContent.trim()
+         } else if (toolName === 'attempt_completion') {
+           // For attempt_completion, the content should be mapped to 'result' parameter
+           parameters.result = toolContent.trim()
          } else {
            parameters.content = toolContent.trim()
          }
@@ -695,15 +771,25 @@ Otherwise, if you have not completed the task and do not need additional informa
         
         this.emit('tool:result', this.taskId, toolCall, result)
         
-        // Check if this is attempt_completion tool with completion_result
-        if (toolCall.name === 'attempt_completion' && result.success && result.result.result === 'completion_result') {
+        // Check if this is attempt_completion tool with task_completion type
+        if (toolCall.name === 'attempt_completion' && result.success && result.result?.result?.type === 'task_completion') {
           // Add completion_result message to clineMessages to mark task as completed
           await this.addClineMessage({
-            type: 'ask',
+            type: 'say',
             say: 'completion_result',
             text: 'Task completed successfully',
             ts: Date.now()
           })
+          
+          // Emit task completed event
+          this.emit('task:completed', {
+            taskId: this.taskId,
+            result: result.result,
+            timestamp: Date.now()
+          })
+          
+          // Emit status update
+          this.emitStatusUpdate('completed', 'Task completed successfully')
         }
         
         // Add tool result to conversation
