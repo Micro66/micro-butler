@@ -153,7 +153,7 @@ export async function taskRoutes(
     }
   });
 
-  // 获取任务详情 - 支持直接返回或流式返回
+  // Get task details - Supports direct return or stream return
   fastify.get<{
     Params: { taskId: string };
     Querystring: { stream?: boolean };
