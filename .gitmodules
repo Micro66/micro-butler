@@ -1,3 +1,6 @@
 [submodule "libs/roo-code"]
 	path = libs/roo-code
 	url = https://github.com/RooCodeInc/Roo-Code.git
+[submodule "libs/a2a-js"]
+	path = libs/a2a-js
+	url = https://github.com/a2aproject/a2a-js.git
